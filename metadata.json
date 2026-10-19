@@ -1,0 +1,6 @@
+{
+  "name": "Acoustic Echo",
+  "description": "3D First-Person Stealth Survival-Thriller set inside sunken research facility Hades-9, navigating with acoustic sonar against blind stalkers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
