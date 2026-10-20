@@ -4,7 +4,7 @@
  * expanding soundwave rings, and pitch-black spatial decay memory.
  */
 import * as THREE from 'three';
-import { type SonarPulseType, SONAR_SPECS } from '../acousticRules';
+import { type SonarPulseType, SONAR_SPECS, isLineOfSightOccludedByWalls } from '../acousticRules';
 import { HADES_9_LEVEL } from '../levelData';
 
 export interface ActivePulse {
@@ -27,6 +27,7 @@ export interface ActivePulse {
 export class AcousticSonarRenderer {
   private scene: THREE.Scene;
   private activePulses: ActivePulse[] = [];
+  public isAirlockOpen: boolean = false;
 
   // Point cloud system
   private pointCloud: THREE.Points;
@@ -358,7 +359,12 @@ export class AcousticSonarRenderer {
       const dist = Math.hypot(dx, dy, dz);
 
       if (dist >= minR && dist <= maxR && dist <= pulse.maxRadius) {
-        // Point is hit by the acoustic wave!
+        // Line-of-sight wall occlusion: sonar waves cannot pass through solid walls
+        if (isLineOfSightOccludedByWalls(px, pz, x, z, HADES_9_LEVEL.walls, this.isAirlockOpen)) {
+          continue;
+        }
+
+        // Point is hit by unobstructed acoustic wave
         const strength = 1.0 - (dist / pulse.maxRadius) * 0.4;
         this.pointAlphas[i] = Math.max(this.pointAlphas[i], strength);
 

@@ -4,7 +4,13 @@
  */
 import * as THREE from 'three';
 import { HADES_9_LEVEL, type EnemySpawn } from '../levelData';
-import { type StalkerState, type SoundEmission, updateEnemyStealthAI } from '../acousticRules';
+import {
+  type StalkerState,
+  type SoundEmission,
+  updateEnemyStealthAI,
+  resolveContinuousWallCollision,
+  sanitizeAcousticOrigin,
+} from '../acousticRules';
 import { audioEngine } from '../audioEngine';
 
 export interface EnemyEntity {
@@ -23,6 +29,7 @@ export interface EnemyEntity {
 export class EnemyManager {
   private scene: THREE.Scene;
   private enemies: Map<string, EnemyEntity> = new Map();
+  public isAirlockOpen = false;
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
@@ -352,19 +359,66 @@ export class EnemyManager {
       }
     }
 
-    // Move toward target
+    // Sanitize target location to prevent chasing inside solid walls
+    const sanitizedTarget = sanitizeAcousticOrigin(
+      targetX,
+      targetZ,
+      HADES_9_LEVEL.walls,
+      this.isAirlockOpen
+    );
+    targetX = sanitizedTarget.x;
+    targetZ = sanitizedTarget.z;
+
+    // Forward Wall Probe & Continuous Collision Resolution
+    const enemyRadius = 0.55;
+    const speed = isChasing ? 5.2 : isInvestigating ? 2.8 : 1.6;
+
     const dx = targetX - state.x;
     const dz = targetZ - state.z;
     const dist = Math.hypot(dx, dz);
 
-    const speed = isChasing ? 5.2 : isInvestigating ? 2.8 : 1.6;
-
     if (dist > 0.4) {
-      const dirX = dx / dist;
-      const dirZ = dz / dist;
+      let dirX = dx / dist;
+      let dirZ = dz / dist;
 
-      state.x += dirX * speed * dt;
-      state.z += dirZ * speed * dt;
+      // 1. Forward Wall Probe: check 1.2m ahead along current motion vector
+      const probeDist = 1.2;
+      const probeTargetX = state.x + dirX * probeDist;
+      const probeTargetZ = state.z + dirZ * probeDist;
+      const probeHit = resolveContinuousWallCollision(
+        probeTargetX,
+        probeTargetZ,
+        enemyRadius,
+        HADES_9_LEVEL.walls,
+        this.isAirlockOpen
+      );
+
+      if (probeHit.collided) {
+        // Obstacle directly ahead: slide along wall tangent instead of pushing directly into wall
+        // Tangent vector is (-normalZ, normalX)
+        const tangentX = -probeHit.wallNormalZ;
+        const tangentZ = probeHit.wallNormalX;
+        const dot = dirX * tangentX + dirZ * tangentZ;
+        const sign = dot >= 0 ? 1 : -1;
+        dirX = tangentX * sign;
+        dirZ = tangentZ * sign;
+      }
+
+      // 2. Candidate motion step
+      const candX = state.x + dirX * speed * dt;
+      const candZ = state.z + dirZ * speed * dt;
+
+      // 3. Continuous Capsule Collision Resolution
+      const resolved = resolveContinuousWallCollision(
+        candX,
+        candZ,
+        enemyRadius,
+        HADES_9_LEVEL.walls,
+        this.isAirlockOpen
+      );
+
+      state.x = resolved.x;
+      state.z = resolved.z;
 
       // Rotate toward movement direction
       const targetAngle = Math.atan2(dirX, dirZ);

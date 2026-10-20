@@ -29,7 +29,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   }, [onStart]);
 
   return (
-    <div className="absolute inset-0 z-20 flex flex-col justify-between p-8 sm:p-12 pointer-events-none select-none text-slate-100 font-mono">
+    <div className="absolute inset-0 z-20 flex flex-col justify-between p-8 sm:p-12 pointer-events-auto select-none text-slate-100 font-mono">
       {/* Top Header Cluster */}
       <div className="flex items-center justify-between pointer-events-auto">
         <div className="flex items-center gap-3">

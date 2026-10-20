@@ -97,6 +97,7 @@ export class PlayerController {
   public onFireDisruptor?: (origin: { x: number; y: number; z: number }, direction: THREE.Vector3) => void;
   public onThrowDebris?: (origin: { x: number; y: number; z: number }, target: { x: number; y: number; z: number }) => void;
   public onObjectiveCompleted?: (objectiveId: string) => void;
+  public onItemPickedUp?: (itemId: string, itemType: string) => void;
 
   constructor(camera: THREE.PerspectiveCamera, domElement: HTMLElement) {
     this.camera = camera;
@@ -371,11 +372,12 @@ export class PlayerController {
    */
   public interactOrBreathe() {
     const item = this.nearbyInteractable;
-    if (item) {
+    if (item && !item.activated) {
       if (item.type === 'keycard_alpha') {
-        this.hasKeycardAlpha = true;
         item.activated = true;
+        this.hasKeycardAlpha = true;
         audioEngine.playTerminalChime(true);
+        this.onItemPickedUp?.(item.id, item.type);
         this.onObjectiveCompleted?.('keycard_alpha');
       } else if (item.type === 'terminal_airlock') {
         if (this.hasKeycardAlpha) {
@@ -386,13 +388,13 @@ export class PlayerController {
           audioEngine.playTerminalChime(false);
         }
       } else if (item.type === 'pump_console') {
-        this.isSecondaryPowerRestored = true;
         item.activated = true;
+        this.isSecondaryPowerRestored = true;
         audioEngine.playTerminalChime(true);
         this.onObjectiveCompleted?.('pump_activated');
       } else if (item.type === 'reactor_terminal') {
-        this.isReactorPurged = true;
         item.activated = true;
+        this.isReactorPurged = true;
         audioEngine.playTerminalChime(true);
         this.onObjectiveCompleted?.('reactor_purged');
       } else if (item.type === 'escape_sub') {
@@ -404,20 +406,25 @@ export class PlayerController {
           audioEngine.playTerminalChime(false);
         }
       } else if (item.type === 'decoy_pickup') {
+        item.activated = true;
         this.decoysCount++;
-        item.activated = true;
         audioEngine.playTerminalChime(true);
+        this.onItemPickedUp?.(item.id, item.type);
       } else if (item.type === 'battery_pickup') {
+        item.activated = true;
         this.batteryCharges = Math.min(4, this.batteryCharges + 1);
-        item.activated = true;
         audioEngine.playTerminalChime(true);
+        this.onItemPickedUp?.(item.id, item.type);
       } else if (item.type === 'debris_pickup') {
-        this.debrisCount++;
         item.activated = true;
+        this.debrisCount++;
         audioEngine.playTerminalChime(true);
+        this.onItemPickedUp?.(item.id, item.type);
       } else if (item.type === 'locker_hiding') {
         this.isHidingInLocker = !this.isHidingInLocker;
       }
+    } else if (item && item.type === 'locker_hiding') {
+      this.isHidingInLocker = !this.isHidingInLocker;
     } else {
       // Hold breath: suppress heartbeat
       this.heartbeatBpm = Math.max(65, this.heartbeatBpm - 8);
@@ -452,7 +459,9 @@ export class PlayerController {
     const isShift = this.keysHeld['ShiftLeft'] || this.keysHeld['ShiftRight'];
     const isCtrl = this.keysHeld['KeyC'] || this.keysHeld['ControlLeft'] || this.keysHeld['ControlRight'];
 
-    if (isCtrl) {
+    // Check overhead clearance: prevent uncrouching inside cramped enclosures/lockers
+    const hasCeilingClearance = !this.isHidingInLocker;
+    if (isCtrl || !hasCeilingClearance) {
       this.stance = 'crouch';
     } else if (isShift && this.stamina > 10) {
       this.stance = 'sprint';
@@ -494,8 +503,8 @@ export class PlayerController {
       const nextX = this.position.x + inputDir.x * baseSpeed * dt;
       const nextZ = this.position.z + inputDir.z * baseSpeed * dt;
 
-      // Wall collision resolution
-      const resolved = this.resolveWallCollisions(nextX, nextZ);
+      // Wall collision resolution with 0.52m capsule radius
+      const resolved = this.resolveWallCollisions(nextX, nextZ, 0.52);
       this.position.x = resolved.x;
       this.position.z = resolved.z;
 
@@ -538,9 +547,10 @@ export class PlayerController {
       }
     }
 
-    // 5. Update Camera Rig
+    // 5. Update Camera Rig with camera occlusion buffer against wall clipping
     const bobOffset = isMoving ? Math.sin(this.headBobTimer) * 0.04 : 0;
-    this.camera.position.set(this.position.x, this.position.y + bobOffset, this.position.z);
+    const camSafePos = this.resolveWallCollisions(this.position.x, this.position.z, 0.55);
+    this.camera.position.set(camSafePos.x, this.position.y + bobOffset, camSafePos.z);
     this.camera.rotation.set(this.pitch, this.yaw, 0, 'YXZ');
 
     // 6. Redraw Diegetic Wristwatch HUD screen
@@ -572,10 +582,9 @@ export class PlayerController {
   /**
    * Circle-to-line-segment collision resolution against Hades-9 bulkheads
    */
-  private resolveWallCollisions(targetX: number, targetZ: number): { x: number; z: number } {
+  private resolveWallCollisions(targetX: number, targetZ: number, radius = 0.52): { x: number; z: number } {
     let px = targetX;
     let pz = targetZ;
-    const playerRadius = 0.45;
 
     for (const wall of HADES_9_LEVEL.walls) {
       // Check if bulkhead is closed
@@ -599,9 +608,9 @@ export class PlayerController {
       const distZ = pz - closestZ;
       const dist = Math.hypot(distX, distZ);
 
-      if (dist < playerRadius && dist > 0.0001) {
+      if (dist < radius && dist > 0.0001) {
         // Push out of wall
-        const overlap = playerRadius - dist;
+        const overlap = radius - dist;
         px += (distX / dist) * overlap;
         pz += (distZ / dist) * overlap;
       }

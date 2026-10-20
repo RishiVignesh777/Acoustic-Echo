@@ -8,7 +8,8 @@ import { buildHades9Scene, type SceneObjects } from './three/sceneBuilder';
 import { AcousticSonarRenderer } from './three/acousticSonarRenderer';
 import { EnemyManager } from './three/enemyManager';
 import { PlayerController, type PlayerStats } from './three/playerController';
-import { type SoundEmission, type SonarPulseType, SONAR_SPECS } from './acousticRules';
+import { type SoundEmission, type SonarPulseType, SONAR_SPECS, sanitizeAcousticOrigin } from './acousticRules';
+import { HADES_9_LEVEL } from './levelData';
 import { audioEngine } from './audioEngine';
 
 export type GameState = 'title' | 'playing' | 'paused' | 'game_over' | 'victory';
@@ -35,7 +36,7 @@ export class GameEngine {
 
   private gameState: GameState = 'title';
   private sounds: SoundEmission[] = [];
-  private activeDecoys: Array<{ x: number; z: number; timer: number; chirpTimer: number }> = [];
+  private activeDecoys: Array<{ x: number; z: number; timer: number; chirpTimer: number; mesh: THREE.Mesh }> = [];
 
   private animFrameId: number | null = null;
   private lastTime = 0;
@@ -128,16 +129,42 @@ export class GameEngine {
     };
 
     this.player.onSoundEmitted = (emission) => {
+      const sanitized = sanitizeAcousticOrigin(
+        emission.x,
+        emission.z,
+        HADES_9_LEVEL.walls,
+        this.enemyManager.isAirlockOpen
+      );
       this.sounds.push({
         id: `snd_${Date.now()}_${Math.random()}`,
         createdAt: Date.now(),
         ...emission,
+        x: sanitized.x,
+        z: sanitized.z,
       });
     };
 
     this.player.onThrowDecoy = (origin, target) => {
-      this.activeDecoys.push({ x: target.x, z: target.z, timer: 9.0, chirpTimer: 0.5 });
-      this.sonarRenderer.triggerPulse('decoy', { x: target.x, y: 0.1, z: target.z });
+      const sanitized = sanitizeAcousticOrigin(
+        target.x,
+        target.z,
+        HADES_9_LEVEL.walls,
+        this.enemyManager.isAirlockOpen
+      );
+
+      // Create pooled 3D Decoy Mesh
+      const decoyGeo = new THREE.CylinderGeometry(0.18, 0.22, 0.35, 8);
+      const decoyMat = new THREE.MeshStandardMaterial({
+        color: 0x06b6d4,
+        emissive: 0x0891b2,
+        emissiveIntensity: 0.8,
+      });
+      const mesh = new THREE.Mesh(decoyGeo, decoyMat);
+      mesh.position.set(sanitized.x, 0.18, sanitized.z);
+      this.scene.add(mesh);
+
+      this.activeDecoys.push({ x: sanitized.x, z: sanitized.z, timer: 9.0, chirpTimer: 0.5, mesh });
+      this.sonarRenderer.triggerPulse('decoy', { x: sanitized.x, y: 0.1, z: sanitized.z });
       this.showAlert('ACOUSTIC DECOY DEPLOYED (REDIRECTING THREATS)', 'info', 2.5);
     };
 
@@ -152,12 +179,19 @@ export class GameEngine {
     };
 
     this.player.onThrowDebris = (origin, target) => {
+      const sanitized = sanitizeAcousticOrigin(
+        target.x,
+        target.z,
+        HADES_9_LEVEL.walls,
+        this.enemyManager.isAirlockOpen
+      );
+
       audioEngine.playDebrisImpact();
-      this.sonarRenderer.triggerPulse('footstep', { x: target.x, y: 0.1, z: target.z });
+      this.sonarRenderer.triggerPulse('footstep', { x: sanitized.x, y: 0.1, z: sanitized.z });
       this.sounds.push({
         id: `debris_${Date.now()}`,
-        x: target.x,
-        z: target.z,
+        x: sanitized.x,
+        z: sanitized.z,
         decibels: 85,
         frequencyHz: 750,
         isHostileAlert: true,
@@ -165,7 +199,45 @@ export class GameEngine {
         duration: 3.0,
         radiusMax: 35,
       });
+
+      // Temporary debris impact shard visual, cleanly disposed after 3.5s
+      const shardGeo = new THREE.DodecahedronGeometry(0.12);
+      const shardMat = new THREE.MeshStandardMaterial({
+        color: 0x94a3b8,
+        metalness: 0.8,
+        roughness: 0.3,
+      });
+      const shardMesh = new THREE.Mesh(shardGeo, shardMat);
+      shardMesh.position.set(sanitized.x, 0.08, sanitized.z);
+      this.scene.add(shardMesh);
+
+      setTimeout(() => {
+        this.scene.remove(shardMesh);
+        shardGeo.dispose();
+        shardMat.dispose();
+      }, 3500);
+
       this.showAlert('DEBRIS IMPACT: HIGH ACOUSTIC SIGNATURE CREATED', 'warning', 2.5);
+    };
+
+    this.player.onItemPickedUp = (itemId, itemType) => {
+      // Immediate state and visual disposal: remove 3D mesh and cleanup GPU resources
+      const mesh = this.sceneObjects.interactiveMeshes.get(itemId);
+      if (mesh) {
+        mesh.visible = false;
+        this.sceneObjects.rootGroup.remove(mesh);
+        mesh.traverse((child) => {
+          if (child instanceof THREE.Mesh) {
+            child.geometry?.dispose();
+            if (Array.isArray(child.material)) {
+              child.material.forEach((m) => m.dispose());
+            } else {
+              child.material?.dispose();
+            }
+          }
+        });
+        this.sceneObjects.interactiveMeshes.delete(itemId);
+      }
     };
 
     this.player.onObjectiveCompleted = (objectiveId) => {
@@ -174,6 +246,8 @@ export class GameEngine {
         this.showAlert('KEYCARD ALPHA ACQUIRED: BULKHEAD CLEARANCE GRANTED', 'info', 4.0);
       } else if (objectiveId === 'bulkhead_unlocked') {
         this.currentObjectiveIdx = 2;
+        this.enemyManager.isAirlockOpen = true;
+        this.sonarRenderer.isAirlockOpen = true;
         this.showAlert('BULKHEAD ALPHA OPENED: ENTERING SUBMERGED ENGINEERING', 'warning', 4.0);
         // Open physical airlock door in 3D scene
         if (this.sceneObjects.airlockDoorGroup) {
@@ -339,6 +413,10 @@ export class GameEngine {
       }
 
       if (decoy.timer <= 0) {
+        // Complete memory cleanup & GPU resource disposal
+        this.scene.remove(decoy.mesh);
+        decoy.mesh.geometry.dispose();
+        (decoy.mesh.material as THREE.Material).dispose();
         this.activeDecoys.splice(i, 1);
       }
     }

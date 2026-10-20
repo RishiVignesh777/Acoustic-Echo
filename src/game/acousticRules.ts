@@ -199,3 +199,127 @@ export function updateEnemyStealthAI(
     targetZ: nextTargetZ,
   };
 }
+
+export interface WallSegmentLike {
+  x1: number;
+  z1: number;
+  x2: number;
+  z2: number;
+  height: number;
+  type?: string;
+}
+
+/**
+ * Robust 2D Line Segment Intersection test.
+ */
+export function doLineSegmentsIntersect(
+  p1x: number, p1z: number, p2x: number, p2z: number,
+  w1x: number, w1z: number, w2x: number, w2z: number
+): boolean {
+  const ccw = (ax: number, az: number, bx: number, bz: number, cx: number, cz: number) => {
+    return (cz - az) * (bx - ax) > (bz - az) * (cx - ax);
+  };
+
+  const a = ccw(p1x, p1z, w1x, w1z, w2x, w2z);
+  const b = ccw(p2x, p2z, w1x, w1z, w2x, w2z);
+  const c = ccw(p1x, p1z, p2x, p2z, w1x, w1z);
+  const d = ccw(p1x, p1z, p2x, p2z, w2x, w2z);
+
+  return a !== b && c !== d;
+}
+
+/**
+ * Checks if line-of-sight between two points is occluded by walls.
+ * Accounts for whether the security bulkhead is open.
+ */
+export function isLineOfSightOccludedByWalls(
+  fromX: number,
+  fromZ: number,
+  toX: number,
+  toZ: number,
+  walls: WallSegmentLike[],
+  isAirlockOpen = false
+): boolean {
+  for (const wall of walls) {
+    // Bulkhead Alpha gate is transparent when open
+    if (isAirlockOpen && Math.abs(wall.z1 - 35) < 0.1 && Math.abs(wall.z2 - 35) < 0.1) {
+      if (Math.min(wall.x1, wall.x2) >= -2.0 && Math.max(wall.x1, wall.x2) <= 2.0) {
+        continue;
+      }
+    }
+
+    if (doLineSegmentsIntersect(fromX, fromZ, toX, toZ, wall.x1, wall.z1, wall.x2, wall.z2)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Resolves continuous circle/capsule collision against wall segments.
+ * Computes closest point on line segment and projects entity out along normal.
+ */
+export function resolveContinuousWallCollision(
+  targetX: number,
+  targetZ: number,
+  radius: number,
+  walls: WallSegmentLike[],
+  isAirlockOpen = false
+): { x: number; z: number; collided: boolean; wallNormalX: number; wallNormalZ: number } {
+  let px = targetX;
+  let pz = targetZ;
+  let collided = false;
+  let normalX = 0;
+  let normalZ = 0;
+
+  for (const wall of walls) {
+    if (isAirlockOpen && Math.abs(wall.z1 - 35) < 0.1 && Math.abs(wall.z2 - 35) < 0.1) {
+      if (Math.min(wall.x1, wall.x2) >= -2.0 && Math.max(wall.x1, wall.x2) <= 2.0) {
+        continue;
+      }
+    }
+
+    const dx = wall.x2 - wall.x1;
+    const dz = wall.z2 - wall.z1;
+    const wallLenSq = dx * dx + dz * dz;
+    if (wallLenSq === 0) continue;
+
+    let t = ((px - wall.x1) * dx + (pz - wall.z1) * dz) / wallLenSq;
+    t = Math.max(0, Math.min(1, t));
+
+    const closestX = wall.x1 + t * dx;
+    const closestZ = wall.z1 + t * dz;
+
+    const distX = px - closestX;
+    const distZ = pz - closestZ;
+    const dist = Math.hypot(distX, distZ);
+
+    if (dist < radius && dist > 0.0001) {
+      collided = true;
+      const overlap = radius - dist;
+      const nx = distX / dist;
+      const nz = distZ / dist;
+      px += nx * overlap;
+      pz += nz * overlap;
+      normalX = nx;
+      normalZ = nz;
+    }
+  }
+
+  return { x: px, z: pz, collided, wallNormalX: normalX, wallNormalZ: normalZ };
+}
+
+/**
+ * Clamps noise origin points to valid navigable space so enemies never chase coordinates inside walls.
+ */
+export function sanitizeAcousticOrigin(
+  x: number,
+  z: number,
+  walls: WallSegmentLike[],
+  isAirlockOpen = false
+): { x: number; z: number } {
+  // Push origin at least 0.65m away from any wall
+  const resolved = resolveContinuousWallCollision(x, z, 0.65, walls, isAirlockOpen);
+  return { x: resolved.x, z: resolved.z };
+}
+

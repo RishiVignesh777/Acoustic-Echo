@@ -7,6 +7,10 @@ import {
   isHeartbeatAudible,
   updateEnemyStealthAI,
   SONAR_SPECS,
+  doLineSegmentsIntersect,
+  isLineOfSightOccludedByWalls,
+  resolveContinuousWallCollision,
+  sanitizeAcousticOrigin,
   type StalkerState,
   type SoundEmission,
 } from './acousticRules.ts';
@@ -89,4 +93,49 @@ test('SONAR_SPECS holds expected parameters', () => {
   assert.equal(SONAR_SPECS.focused.noiseDecibels, 38);
   assert.equal(SONAR_SPECS.heavy.noiseDecibels, 85);
   assert.ok(SONAR_SPECS.heavy.radius > SONAR_SPECS.focused.radius);
+});
+
+test('doLineSegmentsIntersect detects wall intersections', () => {
+  // Ray from (0, 0) to (0, 10) crossing wall from (-5, 5) to (5, 5)
+  const hits = doLineSegmentsIntersect(0, 0, 0, 10, -5, 5, 5, 5);
+  assert.equal(hits, true);
+
+  // Parallel non-intersecting
+  const misses = doLineSegmentsIntersect(0, 0, 0, 10, 2, 0, 2, 10);
+  assert.equal(misses, false);
+});
+
+test('isLineOfSightOccludedByWalls blocks sound line-of-sight across bulkheads', () => {
+  const walls = [
+    { x1: -10, z1: 20, x2: 10, z2: 20, height: 4 }
+  ];
+
+  // Point on one side (0, 10) and point on other side (0, 30) -> blocked
+  assert.equal(isLineOfSightOccludedByWalls(0, 10, 0, 30, walls), true);
+
+  // Both points on same side (0, 5) to (5, 10) -> not blocked
+  assert.equal(isLineOfSightOccludedByWalls(0, 5, 5, 10, walls), false);
+});
+
+test('resolveContinuousWallCollision projects entity out of wall penetration', () => {
+  const walls = [
+    { x1: -10, z1: 20, x2: 10, z2: 20, height: 4 }
+  ];
+
+  // Entity positioned at (0, 20.1) with radius 0.5m penetrates wall by 0.4m
+  const resolved = resolveContinuousWallCollision(0, 20.1, 0.5, walls);
+  assert.equal(resolved.collided, true);
+  // Must be pushed to at least distance 0.5m away from z=20 (z >= 20.5)
+  assert.ok(resolved.z >= 20.49, `Expected z >= 20.49, got ${resolved.z}`);
+});
+
+test('sanitizeAcousticOrigin ensures sounds never spawn inside wall geometry', () => {
+  const walls = [
+    { x1: -10, z1: 20, x2: 10, z2: 20, height: 4 }
+  ];
+
+  // Sound coordinate placed directly on wall (0, 20.05)
+  const sanitized = sanitizeAcousticOrigin(0, 20.05, walls);
+  const distToWall = Math.abs(sanitized.z - 20);
+  assert.ok(distToWall >= 0.64, `Expected distance >= 0.64, got ${distToWall}`);
 });
